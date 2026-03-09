@@ -89,12 +89,6 @@ export const AudioVisualizer = ({
             {heights.map((h, colIdx) => {
                 const halfRows = Math.floor(rows / 2);
                 const litHalfRows = Math.floor(h * halfRows);
-                const isEdgeColumn = colIdx === 0 || colIdx === bars - 1;
-                const centerStart = Math.floor(bars / 2) - 4;
-                const centerEnd = Math.floor(bars / 2) + 3;
-                const isCenterColumn =
-                    colIdx >= centerStart && colIdx <= centerEnd;
-                const hasSound = litHalfRows > 1;
                 return (
                     <div key={colIdx} className="flex flex-col gap-0.5 flex-1">
                         {Array.from({ length: rows }).map((_, rowIdx) => {
@@ -110,10 +104,8 @@ export const AudioVisualizer = ({
                                 <AudioPixel
                                     key={rowIdx}
                                     isLit={isLit}
-                                    distanceFromCenter={distanceFromCenter}
-                                    isEdgeColumn={isEdgeColumn}
-                                    isCenterColumn={isCenterColumn}
-                                    hasSound={hasSound}
+                                    rowIndex={rowIdx}
+                                    totalRows={rows}
                                     width={audioPixelWidth}
                                     height={audioPixelHeight}
                                 />
