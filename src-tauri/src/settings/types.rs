@@ -1,5 +1,17 @@
 use serde::{Deserialize, Serialize};
 
+fn default_vad_enabled() -> bool {
+    true
+}
+
+fn default_vad_threshold() -> f32 {
+    0.02
+}
+
+fn default_vad_padding_ms() -> u32 {
+    300
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub enum PasteMethod {
     #[default]
@@ -52,6 +64,12 @@ pub struct AppSettings {
     pub wake_word_cancel: String,
     pub wake_word_validate: String,
     pub auto_enter_after_wake_word: bool,
+    #[serde(default = "default_vad_enabled")]
+    pub vad_enabled: bool,    // Enable voice activity detection to filter silence from WAV output
+    #[serde(default = "default_vad_threshold")]
+    pub vad_threshold: f32,   // RMS threshold below which audio is considered silence
+    #[serde(default = "default_vad_padding_ms")]
+    pub vad_padding_ms: u32,  // Milliseconds of audio to keep after speech ends (tail padding)
 }
 
 impl Default for AppSettings {
@@ -88,6 +106,9 @@ impl Default for AppSettings {
             wake_word_cancel: "alix cancel".to_string(),
             wake_word_validate: "alix validate".to_string(),
             auto_enter_after_wake_word: false,
+            vad_enabled: true,
+            vad_threshold: 0.02,
+            vad_padding_ms: 300,
         }
     }
 }

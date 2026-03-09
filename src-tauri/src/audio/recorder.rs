@@ -159,6 +159,13 @@ impl Drop for AudioRecorder {
     }
 }
 
+/// VAD configuration loaded once at stream-build time.
+struct VadConfig {
+    enabled: bool,
+    threshold: f32,
+    padding_ms: u32,
+}
+
 fn build_stream(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,
@@ -167,6 +174,13 @@ fn build_stream(
     limit_reached: Arc<AtomicBool>,
     recording_trigger: RecordingTrigger,
 ) -> Result<cpal::Stream> {
+    let settings = crate::settings::load_settings(&app);
+    let vad_config = VadConfig {
+        enabled: settings.vad_enabled,
+        threshold: settings.vad_threshold,
+        padding_ms: settings.vad_padding_ms,
+    };
+
     match config.sample_format() {
         cpal::SampleFormat::F32 => build_stream_impl::<f32>(
             device,
@@ -175,6 +189,7 @@ fn build_stream(
             app,
             limit_reached.clone(),
             recording_trigger,
+            vad_config,
         ),
         cpal::SampleFormat::I16 => build_stream_impl::<i16>(
             device,
@@ -183,6 +198,7 @@ fn build_stream(
             app,
             limit_reached.clone(),
             recording_trigger,
+            vad_config,
         ),
         cpal::SampleFormat::I32 => build_stream_impl::<i32>(
             device,
@@ -191,6 +207,7 @@ fn build_stream(
             app,
             limit_reached.clone(),
             recording_trigger,
+            vad_config,
         ),
         f => Err(anyhow::anyhow!("Unsupported sample format: {:?}", f)),
     }
@@ -203,12 +220,14 @@ fn build_stream_impl<T>(
     app: AppHandle,
     limit_reached_flag: Arc<AtomicBool>,
     recording_trigger: RecordingTrigger,
+    vad_config: VadConfig,
 ) -> Result<cpal::Stream>
 where
     T: cpal::Sample + cpal::SizedSample + Send + 'static,
     f32: cpal::FromSample<T>,
 {
     let channels = config.channels() as usize;
+    let sample_rate = config.sample_rate().0 as f32;
 
     // State for simple RMS + EMA smoothing and throttled emission
     let mut acc_sum_squares: f32 = 0.0;
@@ -223,6 +242,13 @@ where
     let mut silence_start: Option<std::time::Instant> = None;
     let mut silence_auto_stop_triggered = false;
     let mut has_speech_started = false;
+
+    // VAD state — only meaningful when vad_config.enabled is true
+    let max_padding_samples = (sample_rate * vad_config.padding_ms as f32 / 1000.0) as usize;
+    let mut pending_samples: Vec<i16> = Vec::new();
+    let mut tail_buffer: std::collections::VecDeque<i16> = std::collections::VecDeque::new();
+    let mut vad_in_speech = false;
+    let mut vad_tail_samples_left: usize = 0;
 
     let app_handle = app.clone();
     let writer_clone = writer.clone();
@@ -242,88 +268,253 @@ where
 
             let mut recorder = writer_clone.lock();
             if let Some(writer) = recorder.as_mut() {
-                for frame in data.chunks_exact(channels) {
-                    let sample = if channels == 1 {
-                        frame[0].to_sample::<f32>()
-                    } else {
-                        frame.iter().map(|&s| s.to_sample::<f32>()).sum::<f32>() / channels as f32
-                    };
+                if vad_config.enabled {
+                    // VAD path: buffer samples for this callback, write decisions happen at emit tick
+                    for frame in data.chunks_exact(channels) {
+                        let sample = if channels == 1 {
+                            frame[0].to_sample::<f32>()
+                        } else {
+                            frame.iter().map(|&s| s.to_sample::<f32>()).sum::<f32>()
+                                / channels as f32
+                        };
+                        let sample_i16 = (sample * i16::MAX as f32) as i16;
+                        pending_samples.push(sample_i16);
 
-                    // write to WAV
-                    let sample_i16 = (sample * i16::MAX as f32) as i16;
-                    if let Err(e) = writer.write_sample(sample_i16) {
-                        error!("Error writing sample: {}", e);
+                        // accumulate for RMS
+                        acc_sum_squares += sample * sample;
+                        acc_count += 1;
                     }
 
-                    // accumulate for RMS
-                    acc_sum_squares += sample * sample;
-                    acc_count += 1;
-                }
-            }
+                    // Throttle to ~30 FPS
+                    if last_emit.elapsed() >= std::time::Duration::from_millis(33) {
+                        if acc_count > 0 {
+                            let rms = (acc_sum_squares / acc_count as f32).sqrt();
+                            let is_speech = rms >= vad_config.threshold;
 
-            // Throttle to ~30 FPS
-            if last_emit.elapsed() >= std::time::Duration::from_millis(33) {
-                if acc_count > 0 {
-                    let rms = (acc_sum_squares / acc_count as f32).sqrt();
-                    // Normalize a bit and clamp
-                    let mut level = (rms * 1.5).min(1.0);
-                    // simple noise gate
-                    if level < 0.02 {
-                        level = 0.0;
-                    }
-                    // EMA smoothing
-                    ema_level = alpha * level + (1.0 - alpha) * ema_level;
-                    let _ = app_handle.emit("mic-level", ema_level);
-                    if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay")
-                    {
-                        let _ = overlay_window.emit("mic-level", ema_level);
-                    }
-
-                    if is_wake_word && !silence_auto_stop_triggered {
-                        if rms >= SILENCE_AUTO_STOP_SPEECH_THRESHOLD {
-                            if !has_speech_started {
-                                info!("Wake word auto-stop: speech detected (rms={:.4})", rms);
-                            }
-                            has_speech_started = true;
-                        }
-
-                        if has_speech_started {
-                            if rms < SILENCE_AUTO_STOP_THRESHOLD {
-                                if silence_start.is_none() {
-                                    silence_start = Some(std::time::Instant::now());
-                                    debug!("Wake word auto-stop: silence started (rms={:.4})", rms);
+                            // --- VAD write logic ---
+                            if is_speech {
+                                if !vad_in_speech {
+                                    // Transition: silence → speech.
+                                    // Flush the tail_buffer as pre-roll padding, then the pending frame.
+                                    debug!("VAD: speech started (rms={:.4})", rms);
+                                    for s in tail_buffer.drain(..) {
+                                        if let Err(e) = writer.write_sample(s) {
+                                            error!("Error writing VAD tail sample: {}", e);
+                                        }
+                                    }
+                                    vad_in_speech = true;
+                                    vad_tail_samples_left = 0;
                                 }
-                                if let Some(start) = silence_start {
-                                    if start.elapsed()
-                                        >= std::time::Duration::from_millis(SILENCE_AUTO_STOP_MS)
-                                    {
-                                        silence_auto_stop_triggered = true;
-                                        info!(
-                                            "Wake word auto-stop: stopping after {}ms silence",
-                                            SILENCE_AUTO_STOP_MS
-                                        );
-                                        let app = app_handle.clone();
-                                        std::thread::spawn(move || {
-                                            crate::shortcuts::force_stop_recording(&app);
-                                        });
+                                // Write the current pending frame
+                                for &s in &pending_samples {
+                                    if let Err(e) = writer.write_sample(s) {
+                                        error!("Error writing sample: {}", e);
                                     }
                                 }
                             } else {
-                                silence_start = None;
+                                // Silence frame
+                                if vad_in_speech || vad_tail_samples_left > 0 {
+                                    // We're in the tail padding window: write samples and count down
+                                    for &s in &pending_samples {
+                                        if let Err(e) = writer.write_sample(s) {
+                                            error!("Error writing VAD padding sample: {}", e);
+                                        }
+                                    }
+                                    if vad_in_speech {
+                                        // First silent frame after speech: start the tail countdown
+                                        vad_in_speech = false;
+                                        vad_tail_samples_left =
+                                            max_padding_samples.saturating_sub(pending_samples.len());
+                                        debug!("VAD: silence started, tail padding begun");
+                                    } else {
+                                        vad_tail_samples_left = vad_tail_samples_left
+                                            .saturating_sub(pending_samples.len());
+                                        if vad_tail_samples_left == 0 {
+                                            debug!("VAD: tail padding exhausted");
+                                        }
+                                    }
+                                } else {
+                                    // Pure silence beyond padding: accumulate into the tail_buffer
+                                    // so we have pre-roll context if speech resumes.
+                                    for &s in &pending_samples {
+                                        tail_buffer.push_back(s);
+                                    }
+                                    // Keep tail_buffer bounded to max_padding_samples
+                                    while tail_buffer.len() > max_padding_samples {
+                                        tail_buffer.pop_front();
+                                    }
+                                }
+                            }
+                            // ----------------------
+
+                            pending_samples.clear();
+
+                            // Normalise + noise-gate + EMA for visualizer (unchanged)
+                            let mut level = (rms * 1.5).min(1.0);
+                            if level < 0.02 {
+                                level = 0.0;
+                            }
+                            ema_level = alpha * level + (1.0 - alpha) * ema_level;
+                            let _ = app_handle.emit("mic-level", ema_level);
+                            if let Some(overlay_window) =
+                                app_handle.get_webview_window("recording_overlay")
+                            {
+                                let _ = overlay_window.emit("mic-level", ema_level);
+                            }
+
+                            // Silence auto-stop (wake word mode) — unchanged
+                            if is_wake_word && !silence_auto_stop_triggered {
+                                if rms >= SILENCE_AUTO_STOP_SPEECH_THRESHOLD {
+                                    if !has_speech_started {
+                                        info!(
+                                            "Wake word auto-stop: speech detected (rms={:.4})",
+                                            rms
+                                        );
+                                    }
+                                    has_speech_started = true;
+                                }
+
+                                if has_speech_started {
+                                    if rms < SILENCE_AUTO_STOP_THRESHOLD {
+                                        if silence_start.is_none() {
+                                            silence_start = Some(std::time::Instant::now());
+                                            debug!(
+                                                "Wake word auto-stop: silence started (rms={:.4})",
+                                                rms
+                                            );
+                                        }
+                                        if let Some(start) = silence_start {
+                                            if start.elapsed()
+                                                >= std::time::Duration::from_millis(
+                                                    SILENCE_AUTO_STOP_MS,
+                                                )
+                                            {
+                                                silence_auto_stop_triggered = true;
+                                                info!(
+                                                    "Wake word auto-stop: stopping after {}ms silence",
+                                                    SILENCE_AUTO_STOP_MS
+                                                );
+                                                let app = app_handle.clone();
+                                                std::thread::spawn(move || {
+                                                    crate::shortcuts::force_stop_recording(&app);
+                                                });
+                                            }
+                                        }
+                                    } else {
+                                        silence_start = None;
+                                    }
+                                }
+                            }
+
+                            acc_sum_squares = 0.0;
+                            acc_count = 0;
+                        } else {
+                            pending_samples.clear();
+                            let _ = app_handle.emit("mic-level", 0.0f32);
+                            if let Some(overlay_window) =
+                                app_handle.get_webview_window("recording_overlay")
+                            {
+                                let _ = overlay_window.emit("mic-level", 0.0f32);
                             }
                         }
+                        last_emit = std::time::Instant::now();
+                    }
+                } else {
+                    // Non-VAD path: original behaviour — write every sample immediately
+                    for frame in data.chunks_exact(channels) {
+                        let sample = if channels == 1 {
+                            frame[0].to_sample::<f32>()
+                        } else {
+                            frame.iter().map(|&s| s.to_sample::<f32>()).sum::<f32>()
+                                / channels as f32
+                        };
+
+                        // write to WAV
+                        let sample_i16 = (sample * i16::MAX as f32) as i16;
+                        if let Err(e) = writer.write_sample(sample_i16) {
+                            error!("Error writing sample: {}", e);
+                        }
+
+                        // accumulate for RMS
+                        acc_sum_squares += sample * sample;
+                        acc_count += 1;
                     }
 
-                    acc_sum_squares = 0.0;
-                    acc_count = 0;
-                } else {
-                    let _ = app_handle.emit("mic-level", 0.0f32);
-                    if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay")
-                    {
-                        let _ = overlay_window.emit("mic-level", 0.0f32);
+                    // Throttle to ~30 FPS
+                    if last_emit.elapsed() >= std::time::Duration::from_millis(33) {
+                        if acc_count > 0 {
+                            let rms = (acc_sum_squares / acc_count as f32).sqrt();
+                            // Normalize a bit and clamp
+                            let mut level = (rms * 1.5).min(1.0);
+                            // simple noise gate
+                            if level < 0.02 {
+                                level = 0.0;
+                            }
+                            // EMA smoothing
+                            ema_level = alpha * level + (1.0 - alpha) * ema_level;
+                            let _ = app_handle.emit("mic-level", ema_level);
+                            if let Some(overlay_window) =
+                                app_handle.get_webview_window("recording_overlay")
+                            {
+                                let _ = overlay_window.emit("mic-level", ema_level);
+                            }
+
+                            if is_wake_word && !silence_auto_stop_triggered {
+                                if rms >= SILENCE_AUTO_STOP_SPEECH_THRESHOLD {
+                                    if !has_speech_started {
+                                        info!(
+                                            "Wake word auto-stop: speech detected (rms={:.4})",
+                                            rms
+                                        );
+                                    }
+                                    has_speech_started = true;
+                                }
+
+                                if has_speech_started {
+                                    if rms < SILENCE_AUTO_STOP_THRESHOLD {
+                                        if silence_start.is_none() {
+                                            silence_start = Some(std::time::Instant::now());
+                                            debug!(
+                                                "Wake word auto-stop: silence started (rms={:.4})",
+                                                rms
+                                            );
+                                        }
+                                        if let Some(start) = silence_start {
+                                            if start.elapsed()
+                                                >= std::time::Duration::from_millis(
+                                                    SILENCE_AUTO_STOP_MS,
+                                                )
+                                            {
+                                                silence_auto_stop_triggered = true;
+                                                info!(
+                                                    "Wake word auto-stop: stopping after {}ms silence",
+                                                    SILENCE_AUTO_STOP_MS
+                                                );
+                                                let app = app_handle.clone();
+                                                std::thread::spawn(move || {
+                                                    crate::shortcuts::force_stop_recording(&app);
+                                                });
+                                            }
+                                        }
+                                    } else {
+                                        silence_start = None;
+                                    }
+                                }
+                            }
+
+                            acc_sum_squares = 0.0;
+                            acc_count = 0;
+                        } else {
+                            let _ = app_handle.emit("mic-level", 0.0f32);
+                            if let Some(overlay_window) =
+                                app_handle.get_webview_window("recording_overlay")
+                            {
+                                let _ = overlay_window.emit("mic-level", 0.0f32);
+                            }
+                        }
+                        last_emit = std::time::Instant::now();
                     }
                 }
-                last_emit = std::time::Instant::now();
             }
         },
         |err| error!("Stream error: {}", err),
