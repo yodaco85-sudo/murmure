@@ -4,6 +4,7 @@ import { AudioVisualizer } from '@/features/home/audio-visualizer/audio-visualiz
 import { useLevelState } from '@/features/home/audio-visualizer/hooks/use-level-state';
 import type { LLMConnectSettings } from '@/features/llm-connect/hooks/use-llm-connect';
 import clsx from 'clsx';
+import { motion } from 'framer-motion';
 
 type RecordingMode = 'standard' | 'llm' | 'command';
 
@@ -155,9 +156,20 @@ export const Overlay = () => {
                             audioPixelHeight={2}
                         />
                     ) : (
-                        <span className="text-white text-[8px] flex items-center justify-center h-full">
-                            {getModeLabel(recordingMode)}
-                        </span>
+                        <div className="flex items-center justify-center h-full">
+                            <motion.div
+                                animate={{
+                                    scale: [1, 1.3, 1],
+                                    opacity: [0.4, 0.9, 0.4],
+                                }}
+                                transition={{
+                                    duration: 2,
+                                    repeat: Infinity,
+                                    ease: 'easeInOut',
+                                }}
+                                className="w-1.5 h-1.5 rounded-full bg-sky-400"
+                            />
+                        </div>
                     )}
                 </div>
             )}
