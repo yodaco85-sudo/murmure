@@ -34,11 +34,6 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_log::{Target, TargetKind};
 use wake_word::types::WakeWordState;
 
-#[tauri::command]
-fn show_window(app: tauri::AppHandle) {
-    show_main_window(&app);
-}
-
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(main_window) = app.get_webview_window("main") {
         match main_window.show() {
@@ -168,17 +163,8 @@ pub fn run() {
             }
 
             if !is_autostart {
-                info!("Showing main window");
+                info!("Showing main window (manual launch)");
                 show_main_window(app.handle());
-                // WebView2 sometimes fails to navigate to the Vite dev server silently.
-                // Reload after a short delay once the Tauri event loop is fully running.
-                let app_handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(1500));
-                    if let Some(win) = app_handle.get_webview_window("main") {
-                        let _ = win.eval("window.location.reload()");
-                    }
-                });
             }
 
             Ok(())
@@ -281,8 +267,7 @@ pub fn run() {
             get_wake_word_validate,
             set_wake_word_validate,
             get_auto_enter_after_wake_word,
-            set_auto_enter_after_wake_word,
-            show_window
+            set_auto_enter_after_wake_word
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
