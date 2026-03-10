@@ -168,13 +168,17 @@ pub fn run() {
             }
 
             if !is_autostart {
-                info!("Showing main window and forcing WebView2 page reload");
+                info!("Showing main window");
                 show_main_window(app.handle());
-                // WebView2 sometimes fails to load the Vite dev server silently.
-                // Force a reload to guarantee the page is fetched fresh from localhost:1420.
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.eval("window.location.reload()");
-                }
+                // WebView2 sometimes fails to navigate to the Vite dev server silently.
+                // Reload after a short delay once the Tauri event loop is fully running.
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                    if let Some(win) = app_handle.get_webview_window("main") {
+                        let _ = win.eval("window.location.reload()");
+                    }
+                });
             }
 
             Ok(())
