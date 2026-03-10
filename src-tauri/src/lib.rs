@@ -168,10 +168,13 @@ pub fn run() {
             }
 
             if !is_autostart {
-                // By the time setup() finishes, Vite has been running for 30+ seconds.
-                // The page is already loaded — show the window directly.
-                info!("Showing main window (setup complete, page ready)");
+                info!("Showing main window and forcing WebView2 page reload");
                 show_main_window(app.handle());
+                // WebView2 sometimes fails to load the Vite dev server silently.
+                // Force a reload to guarantee the page is fetched fresh from localhost:1420.
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.eval("window.location.reload()");
+                }
             }
 
             Ok(())
