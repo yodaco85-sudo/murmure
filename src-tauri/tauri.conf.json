@@ -16,7 +16,8 @@
                 "width": 920,
                 "height": 768,
                 "minWidth": 870,
-                "minHeight": 720
+                "minHeight": 720,
+                "visible": false
             }
         ],
         "security": {
@@ -37,7 +38,9 @@
             "icons/icon.icns",
             "icons/icon.ico"
         ],
-        "resources": ["../resources/**/*"],
+        "resources": [
+            "../resources/**/*"
+        ],
         "macOS": {
             "entitlements": "./Entitlements.plist"
         },

@@ -164,7 +164,12 @@ pub fn run() {
 
             if !is_autostart {
                 info!("Showing main window (manual launch)");
-                show_main_window(app.handle());
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    // Wait for WebView2 to finish loading the Vite dev server page
+                    std::thread::sleep(std::time::Duration::from_millis(2500));
+                    show_main_window(&app_handle);
+                });
             }
 
             Ok(())
