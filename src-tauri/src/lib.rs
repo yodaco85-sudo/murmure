@@ -34,6 +34,11 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_log::{Target, TargetKind};
 use wake_word::types::WakeWordState;
 
+#[tauri::command]
+fn show_window(app: tauri::AppHandle) {
+    show_main_window(&app);
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(main_window) = app.get_webview_window("main") {
         match main_window.show() {
@@ -163,12 +168,7 @@ pub fn run() {
             }
 
             if !is_autostart {
-                info!("Waiting for frontend-ready signal before showing window");
-                let app_handle = app.handle().clone();
-                app.listen("frontend-ready", move |_| {
-                    info!("Frontend ready, showing main window");
-                    show_main_window(&app_handle);
-                });
+                info!("Window hidden, waiting for frontend invoke(show_window)");
             }
 
             Ok(())
@@ -271,7 +271,8 @@ pub fn run() {
             get_wake_word_validate,
             set_wake_word_validate,
             get_auto_enter_after_wake_word,
-            set_auto_enter_after_wake_word
+            set_auto_enter_after_wake_word,
+            show_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
