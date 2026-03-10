@@ -227,8 +227,6 @@ where
     f32: cpal::FromSample<T>,
 {
     let channels = config.channels() as usize;
-    let sample_rate = config.sample_rate().0 as f32;
-
     // State for simple RMS + EMA smoothing and throttled emission
     let mut acc_sum_squares: f32 = 0.0;
     let mut acc_count: usize = 0;
@@ -244,7 +242,7 @@ where
     let mut has_speech_started = false;
 
     // VAD state — only meaningful when vad_config.enabled is true
-    let max_padding_samples = (sample_rate * vad_config.padding_ms as f32 / 1000.0) as usize;
+    let max_padding_samples = (48000.0_f32 * vad_config.padding_ms as f32 / 1000.0) as usize;
     let mut pending_samples: Vec<i16> = Vec::new();
     let mut tail_buffer: std::collections::VecDeque<i16> = std::collections::VecDeque::new();
     let mut vad_in_speech = false;
