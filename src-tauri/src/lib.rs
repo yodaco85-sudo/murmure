@@ -168,7 +168,10 @@ pub fn run() {
             }
 
             if !is_autostart {
-                info!("Window hidden, waiting for frontend invoke(show_window)");
+                // By the time setup() finishes, Vite has been running for 30+ seconds.
+                // The page is already loaded — show the window directly.
+                info!("Showing main window (setup complete, page ready)");
+                show_main_window(app.handle());
             }
 
             Ok(())
