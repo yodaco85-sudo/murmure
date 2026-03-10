@@ -38,10 +38,18 @@ impl Model {
         // Dernier recours : chemin relatif depuis le binaire
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
-                let dev_path = exe_dir.join("_up_").join("resources").join(MODEL_FILENAME);
-                if dev_path.exists() {
-                    debug!("Model found at dev location: {}", dev_path.display());
-                    return Ok(dev_path);
+                let paths_to_try = [
+                    exe_dir.join("_up_").join("resources").join(MODEL_FILENAME),
+                    // Dev mode: target/debug/ → ../../resources/ = src-tauri/resources/
+                    exe_dir.join("..").join("..").join("resources").join(MODEL_FILENAME),
+                    // Dev mode: target/debug/ → ../../../resources/ = murmure/resources/
+                    exe_dir.join("..").join("..").join("..").join("resources").join(MODEL_FILENAME),
+                ];
+                for dev_path in &paths_to_try {
+                    if dev_path.exists() {
+                        debug!("Model found at dev location: {}", dev_path.display());
+                        return Ok(dev_path.clone());
+                    }
                 }
             }
         }
