@@ -90,18 +90,6 @@ export const Overlay = () => {
         }
     }, [feedback]);
 
-    const getModeLabel = (mode: RecordingMode): string => {
-        switch (mode) {
-            case 'llm':
-                return 'LLM';
-            case 'command':
-                return 'Command';
-            case 'standard':
-            default:
-                return 'Transcription';
-        }
-    };
-
     return (
         <div
             className={clsx(
