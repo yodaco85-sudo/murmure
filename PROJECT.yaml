@@ -1,0 +1,8 @@
+id: murmure
+status: active
+purpose: application locale et privée de transcription vocale
+owner: Yoann
+path: W-SPACE/projects/murmure
+last_reviewed: 2026-07-19
+metadata_source: README.md, AGENTS.md
+review_basis: application Tauri documentée avec commandes de build et lint
